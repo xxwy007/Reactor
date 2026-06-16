@@ -3,11 +3,10 @@
 
 int main()
 {
-    Reactor reac;
+    EventLoop loop;
+    Reactor reac(&loop);
 
-    std::cout << "Server already\n";
-    reac.addListenPort();
-    reac.run();
-    
+    reac.addListenPort(9999);
+    loop.loop();    
     return 0;
 }

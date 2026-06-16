@@ -11,21 +11,14 @@
 #include <string>
 #include <unordered_map>
 
-Reactor::Reactor()
-    : m_threadPool(5)
+Reactor::Reactor(EventLoop* loop)
+    : m_loop(loop)
 {
-    m_epfd = epoll_create1(0);
-    m_wakeupFd = eventfd(0, EFD_NONBLOCK);
+    m_loop->setEventCallback([this](int fd, uint32_t events){
+        onEvent(fd, events);
+    });
 
-    epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.fd = m_wakeupFd;
-
-    epoll_ctl(
-        m_epfd,
-        EPOLL_CTL_ADD,
-        m_wakeupFd,
-        &ev);
+    m_threadPool = new ThreadPool(5);
 }
 
 Reactor::~Reactor()
@@ -40,47 +33,18 @@ Reactor::~Reactor()
         close(fd);
     }
 
-    close(m_epfd);
+    delete m_threadPool;
 }
 
 bool Reactor::addListenPort(uint16_t port)
 {
     int fd = createServer(port);
 
-    epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.fd = fd;
-
-    epoll_ctl(m_epfd, EPOLL_CTL_ADD, fd, &ev);
-
     m_listenfds.push_back(fd);
 
+    m_loop->addEvent(fd, EPOLLIN);
+
     return true;
-}
-void Reactor::run()
-{
-    epoll_event evs[MAX_EVENTS];
-
-    while (1)
-    {
-        int nready = epoll_wait(m_epfd, evs, MAX_EVENTS, -1);
-
-        for (int i = 0; i < nready; i++)
-        {
-            int fd = evs[i].data.fd;
-
-            if (fd == m_wakeupFd)
-            {
-                handleWakeup();
-            }
-            else if (isListenFd(fd))
-                handleAccept(fd);
-            else if (evs[i].events & EPOLLIN)
-                handleRead(fd);
-            else if (evs[i].events & EPOLLOUT)
-                handleWrite(fd);
-        }
-    }
 }
 
 int Reactor::createServer(uint16_t port)
@@ -123,53 +87,17 @@ void Reactor::handleAccept(int listenfd)
     if (connfd < 0)
         return;
 
-    int flags =
-        fcntl(connfd,
-              F_GETFL,
-              0);
+    int flags = fcntl(connfd, F_GETFL, 0);
 
-    fcntl(connfd,
-          F_SETFL,
-          flags | O_NONBLOCK);
+    fcntl(connfd, F_SETFL, flags | O_NONBLOCK);
 
     std::shared_ptr<Connection> conn = std::make_shared<Connection>();
     conn->fd = connfd;
-
     m_conns[connfd] = conn;
 
-    epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.fd = connfd;
-
-    epoll_ctl(m_epfd, EPOLL_CTL_ADD, connfd, &ev);
+    m_loop->addEvent(connfd, EPOLLIN);
 
     std::cout << "accept: " << connfd << std::endl;
-}
-
-void Reactor::handleWakeup()
-{
-    uint64_t val;
-
-    read(m_wakeupFd, &val, sizeof(val));
-
-    std::queue<int> localQueue;
-
-    {
-        std::lock_guard lock(m_pendingMtx);
-        std::swap(localQueue, m_pendingWrite);
-    }
-
-    while (!localQueue.empty())
-    {
-        int fd = localQueue.front();
-
-        localQueue.pop();
-
-        epoll_event ev;
-        ev.events = EPOLLIN | EPOLLOUT;
-        ev.data.fd = fd;
-        epoll_ctl(m_epfd, EPOLL_CTL_MOD, fd, &ev);
-    }
 }
 
 void Reactor::handleRead(int clientfd)
@@ -187,8 +115,13 @@ void Reactor::handleRead(int clientfd)
 
     conn->readBuffer.assign(buf, len);
 
-    m_threadPool.addTask([this, conn]
-                         { process(conn); });
+    m_threadPool->addTask([this, conn]
+    { 
+        process(conn); 
+        m_loop->queueInLoop([this, conn]{
+            m_loop->updateEvent(conn->fd, EPOLLOUT);
+        });         
+    });
 }
 
 void Reactor::handleWrite(int clientfd)
@@ -201,7 +134,7 @@ void Reactor::handleWrite(int clientfd)
 
     int len = send(clientfd, conn->writeBuffer.data(), conn->writeBuffer.size(), 0);
 
-    epoll_ctl(m_epfd, EPOLL_CTL_MOD, clientfd, &ev);
+    m_loop->updateEvent(clientfd, EPOLLIN);
 }
 
 bool Reactor::isListenFd(int fd)
@@ -223,12 +156,20 @@ void Reactor::process(std::shared_ptr<Connection> conn)
         std::lock_guard lock(conn->connMtx);
         conn->writeBuffer = response;
     }
+}
 
+void Reactor::onEvent(int fd, uint32_t events)
+{
+    if (isListenFd(fd))
     {
-        std::lock_guard lock(m_pendingMtx);
-        m_pendingWrite.push(conn->fd);
+        handleAccept(fd);
     }
-    uint64_t one = 1;
-
-    write(m_wakeupFd, &one, sizeof(one));
+    else if (events & EPOLLIN)
+    {
+        handleRead(fd);
+    }
+    else if (events & EPOLLOUT)
+    {
+        handleWrite(fd);
+    }
 }

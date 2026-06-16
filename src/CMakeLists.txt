@@ -10,6 +10,7 @@ file(GLOB ser
     "./Reactor.cpp" 
     "./Server.cpp"
     "./ThreadPool.cpp"
+    "./EventLoop.cpp"
 )
 
 file(GLOB cli "./Client.cpp")
