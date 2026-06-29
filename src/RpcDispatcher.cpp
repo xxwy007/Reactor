@@ -18,7 +18,8 @@ RpcPacket RpcDispatcher::dispatch(const RpcPacket &req)
         return rsp;
     }
 
+    rsp.header.msgId = req.header.msgId;
+    rsp.msg = req.msg;
     rsp.msg.body = it->second->call(req.msg.method, req.msg.body);
-
     return rsp;
 }

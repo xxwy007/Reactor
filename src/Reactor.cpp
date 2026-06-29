@@ -144,7 +144,7 @@ void Reactor::handleRead(int clientfd)
         { 
             RpcPacket rsp = m_dispatcher.dispatch(req);
 
-            m_loop->queueInLoop([conn, rsp]{
+            m_loop->queueInLoop([conn, rsp] {
                 RpcCodec::encode(rsp, conn->writeBuffer);
 
                 conn->channel()->enableWrite();

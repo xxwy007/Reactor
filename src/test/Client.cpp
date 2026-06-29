@@ -10,7 +10,7 @@
 
 int main()
 {
-    constexpr int CLIENT_NUM = 10;
+    constexpr int CLIENT_NUM = 2;
 
     std::vector<int> fds;
 
@@ -59,29 +59,23 @@ int main()
     for (auto fd : fds)
     {
         RpcMessage msg1{"UserService", "queryAge", std::to_string(fd)};
-
-        RpcPacket req1{RpcHeader{std::to_string(msg1), std::string("100" + std::to_string(fd))}, msg1};
-
-        RpcMessage req2{"OrderService", "queryOrder", std::to_string(fd)};
-
-        RpcMessage req;
+        RpcMessage msg2{"OrderService", "queryOrder", std::to_string(fd)};
+        RpcMessage msg;
         if (fd % 2 == 0)
-            req = req1;
+            msg = msg1;
         else
-            req = req2;
+            msg = msg2;
         Buffer buffer;
-        RpcCodec::encode(req, buffer);
-
-        std::string body = req.service + "|" + req.method + "|" + req.body;
+        std::string body = msg.service + "|" + msg.method + "|" + msg.body;
         uint32_t len = body.size();
+        RpcHeader header{len, 100 + static_cast<uint64_t>(fd)};
+        RpcPacket rpcpacket(header, msg);
+        RpcCodec::encode(rpcpacket, buffer);
 
         std::vector<char> packet;
+        packet.resize(buffer.readableBytes());
 
-        packet.resize(4 + len);
-
-        memcpy(packet.data(), &len, 4);
-
-        memcpy(packet.data() + 4, body.data(), len);
+        memcpy(packet.data(), buffer.peek(), buffer.readableBytes());
 
         send(fd, packet.data(), packet.size(), 0);
     }
@@ -96,24 +90,15 @@ int main()
         buffer.append(buf, n);
         std::cout
             << "recv bytes = "
-            << n
-            << "---";
+            << n << std::endl;
 
         uint32_t len;
 
-        memcpy(
-            &len,
-            buffer.peek(),
-            4);
+        RpcPacket packet;
+        RpcCodec::decode(buffer, packet);
 
-        buffer.retrieve(4);
-
-        std::string body(
-            buffer.peek(),
-            len);
-
-        buffer.retrieve(len);
-        std::cout << "body = " << body << std::endl;
+        std::cout << "msgid = " << packet.header.msgId << std::endl;
+        std::cout << "body = " << packet.msg.body << std::endl;
 
         printf("\n");
     }

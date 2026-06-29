@@ -63,11 +63,10 @@ void RpcCodec::parseMessage(const std::string &body, RpcMessage &msg)
 
 void RpcCodec::encode(const RpcPacket &packet, Buffer &buffer)
 {
-    buffer.append(reinterpret_cast<const char *>(&packet.header.bodyLen), sizeof(uint32_t));
-    buffer.append(reinterpret_cast<const char *>(&packet.header.msgId),sizeof(uint64_t));
-
     std::string body = packet.msg.service + "|" + packet.msg.method + "|" + packet.msg.body;
     uint32_t len = body.size();
 
+    buffer.append(reinterpret_cast<const char *>(&len), sizeof(uint32_t));
+    buffer.append(reinterpret_cast<const char *>(&packet.header.msgId),sizeof(uint64_t));
     buffer.append(body.data(), len);
 }

@@ -22,6 +22,9 @@ struct RpcPacket
 {
     RpcHeader header;
     RpcMessage msg;
+
+    RpcPacket() = default;
+    RpcPacket(RpcHeader h, RpcMessage m) : header(h), msg(m) {};
 };
 
 class RpcCodec
