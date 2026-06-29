@@ -5,18 +5,18 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY
     ../${PROJECT_SOURCE_DIR}/bindx64
 )
 
-
-file(GLOB ser 
-    "./Reactor.cpp" 
-    "./Server.cpp"
-    "./ThreadPool.cpp"
-    "./EventLoop.cpp"
+set(core_sources
+    Channel.cpp
+    EventLoop.cpp
+    Reactor.cpp
+    RpcDispatcher.cpp
+    ThreadPool.cpp
 )
 
-file(GLOB cli "./Client.cpp")
+file(GLOB common_src "common/*")
 
-add_executable(Server ${ser})
-add_executable(Client ${cli})
+add_executable(Server ${core_sources} ${common_src} test/Server.cpp)
+add_executable(Client ${core_sources} ${common_src} test/Client.cpp)
 
 target_link_libraries(Server
     PRIVATE

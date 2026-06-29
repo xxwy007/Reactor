@@ -1,4 +1,8 @@
 #include "Reactor.h"
+#include "Channel.h"
+#include "EventLoop.h"
+#include "ThreadPool.h"
+#include "common/RpcMessage.h"
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -11,39 +15,32 @@
 #include <string>
 #include <unordered_map>
 
-Reactor::Reactor(EventLoop* loop)
+Reactor::Reactor(EventLoop *loop,RpcDispatcher& dispatcher)
     : m_loop(loop)
+    ,m_dispatcher(dispatcher)
 {
-    m_loop->setEventCallback([this](int fd, uint32_t events){
-        onEvent(fd, events);
-    });
-
     m_threadPool = new ThreadPool(5);
 }
 
 Reactor::~Reactor()
 {
-    for (auto &[fd, conn] : m_conns)
-    {
-        close(fd);
-    }
-
-    for (auto fd : m_listenfds)
-    {
-        close(fd);
-    }
-
     delete m_threadPool;
 }
 
 bool Reactor::addListenPort(uint16_t port)
 {
-    int fd = createServer(port);
+    int listenfd = createServer(port);
 
-    m_listenfds.push_back(fd);
+    auto channel = std::make_shared<Channel>(m_loop, listenfd);
+    channel->setReadCallback(
+        [this, listenfd]
+        {
+            handleAccept(listenfd);
+        });
 
-    m_loop->addEvent(fd, EPOLLIN);
+    channel->enableRead();
 
+    m_acceptChannels[listenfd] = channel;
     return true;
 }
 
@@ -91,11 +88,26 @@ void Reactor::handleAccept(int listenfd)
 
     fcntl(connfd, F_SETFL, flags | O_NONBLOCK);
 
-    std::shared_ptr<Connection> conn = std::make_shared<Connection>();
-    conn->fd = connfd;
-    m_conns[connfd] = conn;
+    std::shared_ptr<Connection> conn = std::make_shared<Connection>(m_loop, connfd);
 
-    m_loop->addEvent(connfd, EPOLLIN);
+    auto channel = conn->channel();
+    m_acceptChannels[connfd] = channel;
+
+    channel->setReadCallback(
+        [this, connfd]
+        {
+            handleRead(connfd);
+        });
+
+    channel->setWriteCallback(
+        [this, connfd]
+        {
+            handleWrite(connfd);
+        });
+
+    channel->enableRead();
+    conn->channel() = channel;
+    m_conns[connfd] = conn;
 
     std::cout << "accept: " << connfd << std::endl;
 }
@@ -106,43 +118,62 @@ void Reactor::handleRead(int clientfd)
     char buf[BUFFER_LENGTH];
     int len = recv(clientfd, buf, BUFFER_LENGTH, 0);
 
-    if (len == 0)
+    if (len <= 0)
+    {
+        auto conn = m_conns[clientfd];
+        conn->channel()->disableAll();
+        m_loop->removeChannel(conn->channel().get());
+
+        close(clientfd);
+        m_conns.erase(clientfd);
+        return;
+    }
+
+    conn->readBuffer.append(buf, len);
+
+    while (1)
+    {
+        RpcPacket req;
+
+        if (!RpcCodec::decode(conn->readBuffer, req))
+        {
+            break;
+        }
+
+        m_threadPool->addTask([this, conn, req]
+        { 
+            RpcPacket rsp = m_dispatcher.dispatch(req);
+
+            m_loop->queueInLoop([conn, rsp]{
+                RpcCodec::encode(rsp, conn->writeBuffer);
+
+                conn->channel()->enableWrite();
+            });
+        });
+    }
+}
+
+void Reactor::handleWrite(int clientfd)
+{
+    auto &conn = m_conns[clientfd];
+    int len = send(clientfd, conn->writeBuffer.peek(), conn->writeBuffer.readableBytes(), 0);
+    if (len <= 0)
     {
         close(clientfd);
         m_conns.erase(clientfd);
         return;
     }
 
-    conn->readBuffer.assign(buf, len);
+    conn->writeBuffer.retrieve(len);
 
-    m_threadPool->addTask([this, conn]
-    { 
-        process(conn); 
-        m_loop->queueInLoop([this, conn]{
-            m_loop->updateEvent(conn->fd, EPOLLOUT);
-        });         
-    });
+
+    if (conn->writeBuffer.readableBytes() == 0)
+    {
+        conn->channel()->disableWrite();
+    }
 }
 
-void Reactor::handleWrite(int clientfd)
-{
-    auto &conn = m_conns[clientfd];
-    epoll_event ev;
-
-    ev.events = EPOLLIN;
-    ev.data.fd = clientfd;
-
-    int len = send(clientfd, conn->writeBuffer.data(), conn->writeBuffer.size(), 0);
-
-    m_loop->updateEvent(clientfd, EPOLLIN);
-}
-
-bool Reactor::isListenFd(int fd)
-{
-    return std::find(m_listenfds.begin(), m_listenfds.end(), fd) != m_listenfds.end();
-}
-
-void Reactor::process(std::shared_ptr<Connection> conn)
+std::string Reactor::process(RpcMessage& msg)
 {
 
     std::stringstream ss;
@@ -150,26 +181,7 @@ void Reactor::process(std::shared_ptr<Connection> conn)
     ss << ": ";
     std::string tid = ss.str();
 
-    std::string response = tid + conn->readBuffer + "*_*";
+    std::string response = tid + "*_*";
 
-    {
-        std::lock_guard lock(conn->connMtx);
-        conn->writeBuffer = response;
-    }
-}
-
-void Reactor::onEvent(int fd, uint32_t events)
-{
-    if (isListenFd(fd))
-    {
-        handleAccept(fd);
-    }
-    else if (events & EPOLLIN)
-    {
-        handleRead(fd);
-    }
-    else if (events & EPOLLOUT)
-    {
-        handleWrite(fd);
-    }
+    return response;
 }

@@ -5,34 +5,33 @@
 #include <functional>
 #include <mutex>
 #include <queue>
+#include <unordered_map>
+
+class Channel;
 
 class EventLoop
 {
 public:
-    using EventCallback = std::function<void(int, uint32_t)>;
+    using Task = std::function<void()>;
+
+public:
     EventLoop();
     ~EventLoop();
-
     void loop();
-
-    void updateEvent(int fd, uint32_t events);
-    void addEvent(int fd, uint32_t events);
-    void removeEvent(int fd);
-
-    void queueInLoop(std::function<void()> func);
-    void setEventCallback(EventCallback cb)
-    {
-        m_callback = std::move(cb);
-    }
-
+    void quit();
+    void updateChannel(Channel* channel);
+    void removeChannel(Channel* channel);
+    void queueInLoop(Task task);
 private:
     void handleWakeup();
+
 private:
     int m_epfd;
-    int m_wakeupfd;
-    std::mutex m_mutex;
-    std::queue<std::function<void()>> m_pendingTasks;
+    int m_wakeupFd;
+    bool m_quit;
+    std::unordered_map<int, Channel*> m_channels;
+    std::queue<Task> m_pendingTasks;
 
-    EventCallback m_callback;
+    std::mutex m_mutex;
 };
 #endif

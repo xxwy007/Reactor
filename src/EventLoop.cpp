@@ -1,113 +1,136 @@
 #include "EventLoop.h"
+#include "Channel.h"
+
 #include <sys/epoll.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <sys/eventfd.h>
-#include <mutex>
+#include <unistd.h>
+
 #include <iostream>
+constexpr int MAX_EVENTS = 1024;
 
 EventLoop::EventLoop()
+    : m_quit(false)
 {
     m_epfd = epoll_create1(0);
 
-    m_wakeupfd = eventfd(0, EFD_NONBLOCK);
+    // 创建eventfd
+    m_wakeupFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 
-    epoll_event ev;
+    epoll_event ev{};
     ev.events = EPOLLIN;
-    ev.data.fd = m_wakeupfd;
+    ev.data.fd = m_wakeupFd;
 
-    epoll_ctl(m_epfd, EPOLL_CTL_ADD, m_wakeupfd, &ev);
+    epoll_ctl(m_epfd, EPOLL_CTL_ADD, m_wakeupFd, &ev);
 }
 
 EventLoop::~EventLoop()
 {
+    close(m_wakeupFd);
     close(m_epfd);
-    close(m_wakeupfd);
 }
 
 void EventLoop::loop()
 {
-    epoll_event evs[1024];
+    epoll_event events[MAX_EVENTS];
 
-    std::cout << "Server already\n";  
-    while (1)
+    while (!m_quit)
     {
-        int nready = epoll_wait(m_epfd, evs, 1024, -1);
+        int nready = epoll_wait(m_epfd, events, MAX_EVENTS, -1);
+
+        if (nready < 0)
+        {
+            continue;
+        }
 
         for (int i = 0; i < nready; i++)
         {
-            int fd = evs[i].data.fd;
-
-            if (fd == m_wakeupfd)
+            int fd = events[i].data.fd;
+            if (fd == m_wakeupFd)
+            {
                 handleWakeup();
-            else{
-                if(m_callback)
+            }
+            else
+            {
+                auto it = m_channels.find(fd);
+
+                if (it != m_channels.end())
                 {
-                    m_callback(fd, evs[i].events);
+                    Channel *channel = it->second;
+
+                    channel->setRevents(
+                        events[i].events);
+
+                    channel->handleEvent();
                 }
             }
         }
     }
 }
 
-void EventLoop::updateEvent(int fd, uint32_t events)
+void EventLoop::quit()
 {
-    epoll_event ev;
-    ev.events = events;
-    ev.data.fd = fd;
+    m_quit = true;
 
-    epoll_ctl(m_epfd, EPOLL_CTL_MOD, fd, &ev);
+    uint64_t one = 1;
+    write(m_wakeupFd, &one, sizeof(one));
 }
 
-void EventLoop::addEvent(int fd, uint32_t events)
+void EventLoop::updateChannel(Channel *channel)
 {
-    epoll_event ev;
-    ev.events = events;
+    int fd = channel->getfd();
+
+    epoll_event ev{};
+
+    ev.events = channel->getEvents();
     ev.data.fd = fd;
 
-    epoll_ctl(m_epfd, EPOLL_CTL_ADD, fd, &ev);
+    if (m_channels.count(fd) == 0)
+    {
+        epoll_ctl(m_epfd, EPOLL_CTL_ADD, fd, &ev);
+        m_channels[fd] = channel;
+    }
+    else
+    {
+        epoll_ctl(m_epfd, EPOLL_CTL_MOD, fd, &ev);
+    }
 }
 
-void EventLoop::removeEvent(int fd)
+void EventLoop::removeChannel(Channel *channel)
 {
+    int fd = channel->getfd();
+
     epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, nullptr);
+
+    m_channels.erase(fd);
 }
 
-void EventLoop::queueInLoop(std::function<void()> func)
+void EventLoop::queueInLoop(Task task)
 {
     {
-        std::unique_lock<std::mutex> lock(m_mutex);
-
-        m_pendingTasks.push(func);
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_pendingTasks.push(
+            std::move(task));
     }
 
-    uint64_t one;
-
-    write(m_wakeupfd, &one, sizeof(one));
+    uint64_t one = 1;
+    write(m_wakeupFd, &one, sizeof(one));
 }
 
 void EventLoop::handleWakeup()
 {
     uint64_t one;
+    read(m_wakeupFd, &one, sizeof(one));
 
-    read(m_wakeupfd, &one, sizeof(one));
-
-    std::queue<std::function<void()>> tasks;
-
+    std::queue<Task> tasks;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-
-        std::swap(tasks, m_pendingTasks);
+        tasks.swap(m_pendingTasks);
     }
 
     while (!tasks.empty())
     {
         auto task = std::move(tasks.front());
-
         tasks.pop();
-
         task();
     }
 }

@@ -1,55 +1,75 @@
 #ifndef REACTOR_H
 #define REACTOR_H
-
 #include <functional>
 #include <memory>
 #include <vector>
 #include <mutex>
 #include <sys/eventfd.h>
-#include "ThreadPool.h"
-#include "EventLoop.h"
-
+#include "Channel.h"
+#include "common/Buffer.h"
+#include "RpcDispatcher.h"
 #define BUFFER_LENGTH 1024
-struct Connection
+
+class EventLoop;
+class ThreadPool;
+class RpcMessage;
+class Connection
 {
-    int fd{-1};
+public:
+    Connection(EventLoop *loop, int fd)
+        : m_fd(fd)
+    {
+        m_channel = std::make_shared<Channel>(loop, fd);
+    }
 
-    std::string readBuffer;
-    std::string writeBuffer;
+    int fd() const
+    {
+        return m_fd;
+    }
 
-    uint32_t events{0};
+    std::shared_ptr<Channel> channel()
+    {
+        return m_channel;
+    }
 
-    std::mutex connMtx;
+public:
+    Buffer readBuffer;
+    Buffer writeBuffer;
+
+private:
+    int m_fd;
+    std::shared_ptr<Channel> m_channel;
 };
 
 class Reactor
 {
 public:
-    Reactor(EventLoop* loop);
+    Reactor(EventLoop *loop, RpcDispatcher& dispatcher);
     ~Reactor();
 
     bool addListenPort(uint16_t port = 9999);
-    void run();
+
+    void registerService(const std::string &name, std::shared_ptr<Service> service);
 
 private:
     int createServer(uint16_t port);
 
     void handleAccept(int listenfd);
-    void handleWakeup();
     void handleRead(int clientfd);
     void handleWrite(int clientfd);
 
-    bool isListenFd(int fd);
-
-    void process(std::shared_ptr<Connection> conn);
-    void onEvent(int fd, uint32_t events);
+    std::string process(RpcMessage& msg);
 
 private:
     ThreadPool* m_threadPool;
-    EventLoop* m_loop;
+    EventLoop *m_loop;
+    RpcDispatcher m_dispatcher;
 
-    std::vector<int> m_listenfds;
+
+    std::unordered_map<int, std::shared_ptr<Channel>> m_acceptChannels;
     std::unordered_map<int, std::shared_ptr<Connection>> m_conns;
+
+    std::mutex m_connMtx;
 };
 
 #endif
